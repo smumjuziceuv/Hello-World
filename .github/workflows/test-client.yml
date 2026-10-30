@@ -1,0 +1,22 @@
+name: test-client
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install yt-dlp
+        run: |
+          curl -L --retry 3 https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o yt-dlp
+          chmod +x yt-dlp
+      - name: Try clients
+        run: |
+          for client in android ios tv web_safari mweb; do
+            echo "===== $client ====="
+            ./yt-dlp --skip-download --dump-json --no-warnings --no-check-formats \
+              --extractor-args "youtube:player_client=$client" \
+              "https://www.youtube.com/watch?v=FThvfkXWqtE" \
+              | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("title")); print((d.get("description") or "")[:500]); print("GITHUB", [l for l in (d.get("description") or "").splitlines() if "github.com" in l.lower()])' \
+              || echo "FAILED $client"
+          done
