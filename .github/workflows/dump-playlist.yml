@@ -1,0 +1,29 @@
+name: dump-playlist
+on:
+  workflow_dispatch:
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install yt-dlp
+        run: |
+          curl -L --retry 3 https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o yt-dlp
+          chmod +x yt-dlp
+          ./yt-dlp --version
+      - name: Dump flat playlist
+        run: |
+          ./yt-dlp --flat-playlist --dump-single-json "https://www.youtube.com/playlist?list=PLyzTA8cetPdHtlGw1X8Kt7Ea4bd27ApR7" > playlist.flat.json
+          python3 - <<'PY'
+          import json
+          d=json.load(open('playlist.flat.json'))
+          print('PLAYLIST', d.get('title'), d.get('id'), 'entries', len(d.get('entries', [])))
+          for i,e in enumerate(d.get('entries', []),1):
+              print(f"{i:02d}\t{e.get('id')}\t{e.get('title')}\t{e.get('url')}")
+          PY
+      - name: Upload playlist JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: playlist-flat-json
+          path: playlist.flat.json
