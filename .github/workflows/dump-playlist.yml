@@ -1,6 +1,8 @@
 name: dump-playlist
 on:
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   dump:
     runs-on: ubuntu-latest
@@ -12,18 +14,79 @@ jobs:
           curl -L --retry 3 https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o yt-dlp
           chmod +x yt-dlp
           ./yt-dlp --version
-      - name: Dump flat playlist
+      - name: Dump full metadata
         run: |
-          ./yt-dlp --flat-playlist --dump-single-json "https://www.youtube.com/playlist?list=PLyzTA8cetPdHtlGw1X8Kt7Ea4bd27ApR7" > playlist.flat.json
+          mkdir -p results/subs
+          ./yt-dlp --skip-download --dump-single-json --no-warnings --no-check-formats \
+            --extractor-args "youtube:player_client=web" \
+            "https://www.youtube.com/playlist?list=PLyzTA8cetPdHtlGw1X8Kt7Ea4bd27ApR7" \
+            > results/playlist.full.json
+          ./yt-dlp --skip-download --write-auto-subs --write-subs --sub-langs "en.*,en" --sub-format vtt --no-warnings \
+            -o "results/subs/%(id)s.%(ext)s" \
+            "https://www.youtube.com/playlist?list=PLyzTA8cetPdHtlGw1X8Kt7Ea4bd27ApR7" || true
+      - name: Build concise metadata files
+        run: |
           python3 - <<'PY'
-          import json
-          d=json.load(open('playlist.flat.json'))
-          print('PLAYLIST', d.get('title'), d.get('id'), 'entries', len(d.get('entries', [])))
-          for i,e in enumerate(d.get('entries', []),1):
-              print(f"{i:02d}\t{e.get('id')}\t{e.get('title')}\t{e.get('url')}")
+          import json, re, os, glob, html
+          from pathlib import Path
+          root=Path('results')
+          d=json.load(open(root/'playlist.full.json'))
+          entries=d.get('entries', [])
+          (root/'videos').mkdir(exist_ok=True)
+          index=[]
+          gh_re=re.compile(r'https?://(?:www\.)?github\.com/[A-Za-z0-9](?:[A-Za-z0-9._-]*)/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._~:/?#@!$&\'()*+,;=%-]*)?')
+          def sub_text(vid):
+              files=list(Path('results/subs').glob(f'{vid}*.vtt'))
+              if not files: return ''
+              p=files[0]
+              lines=[]
+              for line in p.read_text(errors='ignore').splitlines():
+                  if not line or line.startswith(('WEBVTT','Kind:','Language:')) or '-->' in line or re.fullmatch(r'[0-9:.]+', line):
+                      continue
+                  t=re.sub(r'<[^>]+>', '', line)
+                  t=html.unescape(t).strip()
+                  if t and (not lines or t != lines[-1]): lines.append(t)
+              return '\n'.join(lines)
+          for i,e in enumerate(entries,1):
+              if not e: continue
+              vid=e.get('id')
+              desc=e.get('description') or ''
+              tags=e.get('tags') or []
+              cats=e.get('categories') or []
+              links=sorted(set(m.group(0).rstrip('.,);]') for m in gh_re.finditer(desc+'\n'+' '.join(tags))))
+              transcript=sub_text(vid)
+              rec={
+                'index':i,'id':vid,'title':e.get('title'),'description':desc,
+                'uploader':e.get('uploader') or e.get('channel'),'uploader_id':e.get('uploader_id') or e.get('channel_id'),
+                'uploader_url':e.get('uploader_url') or e.get('channel_url'),
+                'duration':e.get('duration'),'view_count':e.get('view_count'),'like_count':e.get('like_count'),
+                'upload_date':e.get('upload_date'),'tags':tags,'categories':cats,
+                'webpage_url':e.get('webpage_url') or f'https://www.youtube.com/watch?v={vid}',
+                'github_links':links,'transcript':transcript[:12000]
+              }
+              (root/'videos'/f'{i:02d}-{vid}.json').write_text(json.dumps(rec, ensure_ascii=False, indent=2))
+              index.append({k:rec[k] for k in ['index','id','title','uploader','duration','upload_date','github_links','webpage_url']})
+          (root/'index.json').write_text(json.dumps({'playlist':d.get('title'),'id':d.get('id'),'uploader':d.get('uploader') or d.get('channel'),'count':len(entries),'videos':index}, ensure_ascii=False, indent=2))
+          md=['# Playlist metadata index','',f"Playlist: {d.get('title')} ({d.get('id')})",f"Entries: {len(entries)}",'']
+          for x in index:
+              md.append(f"## {x['index']:02d}. {x['title'] or x['id']}")
+              md.append(f"- ID: `{x['id']}`")
+              md.append(f"- URL: {x['webpage_url']}")
+              md.append(f"- Uploader: {x.get('uploader')} | Duration: {x.get('duration')} | Date: {x.get('upload_date')}")
+              if x['github_links']: md.append('- GitHub: ' + ', '.join(x['github_links']))
+              md.append('')
+          (root/'README.md').write_text('\n'.join(md))
+          print('wrote', len(index), 'video files')
           PY
-      - name: Upload playlist JSON
+      - name: Commit results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add results
+          git commit -m "Add playlist metadata dump" || echo "No changes to commit"
+          git push
+      - name: Upload results artifact
         uses: actions/upload-artifact@v4
         with:
-          name: playlist-flat-json
-          path: playlist.flat.json
+          name: playlist-metadata
+          path: results
